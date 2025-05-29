@@ -9,12 +9,16 @@ This project extends the original [FlapPyBird](https://sourabhv.github.io/FlapPy
 
 ## Demo
 ### Training Progress
-<video width="100%" controls>
-  <source src="assets/media/training_screencast.webm" type="video/webm">
-  Your browser does not support the video tag.
-</video>
+![Training Demo](assets/gifs/training_demo.gif)
 
 *Training Process: Watch the agent learn from random movements to skillful navigation*
+
+<details>
+<summary>Alternative Video Format (WebM)</summary>
+
+You can also [download the WebM video](assets/gifs/trimmed_video.webm) for better quality.
+
+</details>
 
 ## Features
 - Deep Q-Learning implementation with PyTorch
