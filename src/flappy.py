@@ -1,9 +1,6 @@
-import asyncio
-import sys
-
 import pygame
-from pygame.locals import K_ESCAPE, K_SPACE, K_UP, KEYDOWN, QUIT
-
+import sys
+import numpy as np
 from .entities import (
     Background,
     Floor,
@@ -16,12 +13,11 @@ from .entities import (
 )
 from .utils import GameConfig, Images, Sounds, Window
 
-
 class Flappy:
     def __init__(self):
         pygame.init()
         pygame.display.set_caption("Flappy Bird")
-        window = Window(288, 512)
+        window = Window(800, 800)
         screen = pygame.display.set_mode((window.width, window.height))
         images = Images()
 
@@ -34,102 +30,169 @@ class Flappy:
             sounds=Sounds(),
         )
 
-    async def start(self):
-        while True:
-            self.background = Background(self.config)
-            self.floor = Floor(self.config)
-            self.player = Player(self.config)
-            self.welcome_message = WelcomeMessage(self.config)
-            self.game_over_message = GameOver(self.config)
-            self.pipes = Pipes(self.config)
-            self.score = Score(self.config)
-            await self.splash()
-            await self.play()
-            await self.game_over()
-
-    async def splash(self):
-        """Shows welcome splash screen animation of flappy bird"""
-
-        self.player.set_mode(PlayerMode.SHM)
-
-        while True:
-            for event in pygame.event.get():
-                self.check_quit_event(event)
-                if self.is_tap_event(event):
-                    return
-
-            self.background.tick()
-            self.floor.tick()
-            self.player.tick()
-            self.welcome_message.tick()
-
-            pygame.display.update()
-            await asyncio.sleep(0)
-            self.config.tick()
-
-    def check_quit_event(self, event):
-        if event.type == QUIT or (
-            event.type == KEYDOWN and event.key == K_ESCAPE
-        ):
-            pygame.quit()
-            sys.exit()
-
-    def is_tap_event(self, event):
-        m_left, _, _ = pygame.mouse.get_pressed()
-        space_or_up = event.type == KEYDOWN and (
-            event.key == K_SPACE or event.key == K_UP
-        )
-        screen_tap = event.type == pygame.FINGERDOWN
-        return m_left or space_or_up or screen_tap
-
-    async def play(self):
-        self.score.reset()
+    def reset(self):
+        """Resets the game and returns the initial state"""
+        self.background = Background(self.config)
+        self.floor = Floor(self.config)
+        self.player = Player(self.config)
+        self.pipes = Pipes(self.config)
+        self.score = Score(self.config)
+        self.score_value = 0  # Add explicit score tracking
         self.player.set_mode(PlayerMode.NORMAL)
+        return self.get_state()
 
-        while True:
-            if self.player.collided(self.pipes, self.floor):
-                return
+    def step(self, action):
+        """Enhanced step function with improved reward structure"""
+        if action == 1:
+            self.player.flap()
 
-            for i, pipe in enumerate(self.pipes.upper):
-                if self.player.crossed(pipe):
-                    self.score.add()
+        # Store previous state
+        prev_y = self.player.y
+        prev_score = self.score_value
+        
+        # Get the next pipe
+        next_upper_pipe = None
+        next_lower_pipe = None
+        for up_pipe, low_pipe in zip(self.pipes.upper, self.pipes.lower):
+            if up_pipe.x + up_pipe.w > self.player.x:
+                next_upper_pipe = up_pipe
+                next_lower_pipe = low_pipe
+                break
+        
+        if next_upper_pipe is None or next_lower_pipe is None:
+            if self.pipes.upper and self.pipes.lower:
+                next_upper_pipe = self.pipes.upper[0]
+                next_lower_pipe = self.pipes.lower[0]
+            else:
+                return self.get_state(), -10.0, True  # Bigger penalty for no pipes
+        
+        # Calculate distances and positions
+        gap_center_y = (next_lower_pipe.y + next_upper_pipe.y + next_upper_pipe.h) / 2
+        prev_dist_to_gap = abs(prev_y - gap_center_y)
 
-            for event in pygame.event.get():
-                self.check_quit_event(event)
-                if self.is_tap_event(event):
-                    self.player.flap()
+        # Update game state
+        self.background.tick()
+        self.floor.tick()
+        self.pipes.tick()
+        self.score.tick()
+        self.player.tick()
 
-            self.background.tick()
-            self.floor.tick()
-            self.pipes.tick()
-            self.score.tick()
-            self.player.tick()
+        # Get new distances and check game state
+        new_dist_to_gap = abs(self.player.y - gap_center_y)
+        done = self.is_done()
+        
+        # Initialize base reward
+        reward = 0.1  # Small positive reward for staying alive
+        
+        # Distance-based reward
+        if new_dist_to_gap < prev_dist_to_gap:
+            reward += 0.5  # Reward for moving towards gap
+        else:
+            reward -= 0.2  # Small penalty for moving away
+            
+        # Position-based rewards
+        if new_dist_to_gap < 50:  # Close to gap center
+            reward += 1.0
+        elif new_dist_to_gap < 100:  # Reasonably close to gap
+            reward += 0.5
+            
+        # Check if passed pipe
+        if (self.player.x > next_upper_pipe.x + next_upper_pipe.w and 
+            self.player.x <= next_upper_pipe.x + next_upper_pipe.w - next_upper_pipe.vel_x):
+            self.score_value += 1
+            reward += 10.0  # Big reward for passing pipe
+            
+        # Failure penalties
+        if done:
+            if self.player.crashed:
+                reward = -10.0  # Bigger penalty for crash
+            else:
+                reward = -5.0  # Smaller penalty for other terminations
+                
+        return self.get_state(), reward, done
 
-            pygame.display.update()
-            await asyncio.sleep(0)
-            self.config.tick()
+    def get_state(self):
+        """Enhanced state representation with better normalization"""
+        screen_height = self.config.window.height
+        screen_width = self.config.window.width
+        
+        # Find next pipe
+        next_upper_pipe = None
+        next_lower_pipe = None
+        for up_pipe, low_pipe in zip(self.pipes.upper, self.pipes.lower):
+            if up_pipe.x + up_pipe.w > self.player.x:
+                next_upper_pipe = up_pipe
+                next_lower_pipe = low_pipe
+                break
+        
+        if next_upper_pipe is None or next_lower_pipe is None:
+            if self.pipes.upper and self.pipes.lower:
+                next_upper_pipe = self.pipes.upper[0]
+                next_lower_pipe = self.pipes.lower[0]
+            else:
+                return np.zeros(8, dtype=np.float32)
+        
+        # Calculate normalized features
+        bird_y = (self.player.y - screen_height/2) / (screen_height/2)  # Center around 0
+        bird_vel = self.player.vel_y / 10.0  # Normalize velocity
+        
+        # Pipe distances and positions
+        pipe_dist_x = (next_upper_pipe.x - self.player.x) / screen_width
+        gap_center_y = (next_lower_pipe.y + next_upper_pipe.y + next_upper_pipe.h) / 2
+        gap_y_normalized = (gap_center_y - screen_height/2) / (screen_height/2)
+        
+        # Gap size and relative position
+        gap_size = (next_lower_pipe.y - (next_upper_pipe.y + next_upper_pipe.h)) / screen_height
+        dist_to_gap = (self.player.y - gap_center_y) / (screen_height/2)
+        
+        # Velocity features
+        vel_towards_gap = -self.player.vel_y if self.player.y > gap_center_y else self.player.vel_y
+        vel_normalized = vel_towards_gap / 15.0
+        
+        return np.array([
+            bird_y,          # Normalized bird height relative to center
+            bird_vel,        # Normalized bird velocity
+            pipe_dist_x,     # Normalized horizontal distance to pipe
+            gap_y_normalized,# Normalized gap vertical position
+            dist_to_gap,     # Normalized distance to gap
+            vel_normalized,  # Normalized velocity towards gap
+            gap_size,       # Normalized gap size
+            self.score_value / 10.0  # Normalized score
+        ], dtype=np.float32)
 
-    async def game_over(self):
-        """crashes the player down and shows gameover image"""
+    def is_done(self):
+        """Enhanced game over detection with better termination conditions"""
+        # Check collision
+        if self.player.collided(self.pipes, self.floor):
+            return True
+            
+        # Height boundaries
+        if self.player.y < -2.5 * self.player.h:  # Too high
+            return True
+        if self.player.y > self.config.window.height - self.player.h:  # Too low
+            return True
+            
+        # Check distance from pipe gap
+        next_upper_pipe = None
+        next_lower_pipe = None
+        for up_pipe, low_pipe in zip(self.pipes.upper, self.pipes.lower):
+            if up_pipe.x + up_pipe.w > self.player.x:
+                next_upper_pipe = up_pipe
+                next_lower_pipe = low_pipe
+                break
+                
+        if next_upper_pipe and next_lower_pipe:
+            gap_center = (next_lower_pipe.y + next_upper_pipe.y + next_upper_pipe.h) / 2
+            if abs(self.player.y - gap_center) > 200:  # Increased tolerance
+                return True
+            
+        return False
 
-        self.player.set_mode(PlayerMode.CRASH)
-        self.pipes.stop()
-        self.floor.stop()
-
-        while True:
-            for event in pygame.event.get():
-                self.check_quit_event(event)
-                if self.is_tap_event(event):
-                    if self.player.y + self.player.h >= self.floor.y - 1:
-                        return
-
-            self.background.tick()
-            self.floor.tick()
-            self.pipes.tick()
-            self.score.tick()
-            self.player.tick()
-            self.game_over_message.tick()
-
-            self.config.tick()
-            pygame.display.update()
-            await asyncio.sleep(0)
+    def draw(self, screen):
+        """Draw the game state to the screen"""
+        self.background.tick()
+        self.floor.tick()
+        self.pipes.tick()
+        self.score.tick()
+        self.player.tick()
+        pygame.display.update()
